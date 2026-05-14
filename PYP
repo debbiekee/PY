@@ -1,0 +1,946 @@
+const {
+  Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+  AlignmentType, HeadingLevel, BorderStyle, WidthType, ShadingType,
+  VerticalAlign, LevelFormat, PageBreak
+} = require('docx');
+const fs = require('fs');
+
+// === UNICODE CONSTANTS ===
+const s0='₀',s1='₁',s2='₂',s3='₃',s4='₄',s5='₅',s6='₆',s7='₇',s8='₈',s9='₉';
+const sup2='²', sup3='³';
+const PM='\u00B1', TIMES='\u00D7', GEQ='\u2265', LEQ='\u2264', APPROX='\u2248';
+const SIG='σ', MU='µ', NU='ν', SUMM='Σ', SQRT='√', DEG='°', ARR='→';
+const XBAR='x\u0305', YBAR='\u0233', DBAR='d\u0305', YHAT='\u0177';
+const H2O2=`H${s2}O${s2}`;
+const H0=`H${s0}`, H1_=`H${s1}`;
+const mu1=MU+s1, mu2=MU+s2;
+const n1='n'+s1, n2='n'+s2, nu1=NU+s1, nu2=NU+s2;
+const sig1sq=SIG+s1+sup2, sig2sq=SIG+s2+sup2;
+const xbar1=XBAR+s1, xbar2=XBAR+s2;
+const LMBDA='\u03BB';
+
+// === TEXT RUN HELPERS ===
+const R  = (t,o={}) => new TextRun({text:t, size:22, ...o});
+const Rb = t => R(t,{bold:true});
+const Ri = t => R(t,{italics:true, color:'666666'});
+const Rf = t => R(t,{font:'Courier New', size:20, color:'1F3864'});
+const Rsub = t => R(t,{subScript:true, size:18});
+const Rsup = t => R(t,{superScript:true, size:18});
+
+// === PARAGRAPH HELPERS ===
+const mkRuns = c => Array.isArray(c) ? c.map(x=>typeof x==='string'?R(x):x) : [R(c)];
+
+function P(content, opts={}) {
+  return new Paragraph({ ...opts, children: mkRuns(content), spacing:{before:60,after:60} });
+}
+function Pindent(content) {
+  return new Paragraph({ indent:{left:720}, children: mkRuns(content), spacing:{before:60,after:60} });
+}
+function Pbold(text) {
+  return new Paragraph({ children:[R(text,{bold:true})], spacing:{before:60,after:60} });
+}
+function Pitalic(text) {
+  return new Paragraph({ children:[R(text,{italics:true,color:'666666'})], spacing:{before:0,after:80} });
+}
+function Pformula(content) {
+  return new Paragraph({ indent:{left:720}, children: mkRuns(content).map(r=>({...r,_element:r._element})), spacing:{before:80,after:80} });
+}
+function bull(content, lvl=0) {
+  return new Paragraph({ numbering:{reference:'bullets',level:lvl}, children:mkRuns(content), spacing:{before:40,after:40} });
+}
+function numbered(content, lvl=0) {
+  return new Paragraph({ numbering:{reference:'numbers',level:lvl}, children:mkRuns(content), spacing:{before:40,after:40} });
+}
+function Pempty() { return new Paragraph({ children:[], spacing:{before:80,after:80} }); }
+function PB()     { return new Paragraph({ children:[new PageBreak()] }); }
+
+// === HEADING HELPERS ===
+function H1(text) {
+  return new Paragraph({
+    heading: HeadingLevel.HEADING_1,
+    children: [R(text,{bold:true,color:'1F4E79',size:32})],
+    spacing:{before:480,after:200},
+    border:{bottom:{style:BorderStyle.SINGLE,size:8,color:'1F4E79',space:4}}
+  });
+}
+function H2(text) {
+  return new Paragraph({
+    heading: HeadingLevel.HEADING_2,
+    children: [R(text,{bold:true,color:'1F4E79',size:26})],
+    spacing:{before:280,after:100}
+  });
+}
+function H3(text) {
+  return new Paragraph({
+    heading: HeadingLevel.HEADING_3,
+    children: [R(text,{bold:true,color:'2E75B6',size:24})],
+    spacing:{before:200,after:80}
+  });
+}
+function SRC(text) {
+  return new Paragraph({ children:[R(`Source: ${text}`,{italics:true,color:'888888',size:20})], spacing:{before:0,after:80} });
+}
+
+// === TABLE HELPERS ===
+const HDR='1F4E79', ALT='D9E8F4';
+const BDR={style:BorderStyle.SINGLE,size:4,color:'2E75B6'};
+const BALL={top:BDR,bottom:BDR,left:BDR,right:BDR};
+const CMARG={top:80,bottom:80,left:130,right:130};
+
+function TC(content, isHdr=false, w=0, isAlt=false) {
+  const fill = isHdr?HDR : isAlt?ALT:'FFFFFF';
+  const col  = isHdr?'FFFFFF':'000000';
+  let paras;
+  if (Array.isArray(content) && content.length && content[0] instanceof Paragraph) {
+    paras = content;
+  } else {
+    const runs = mkRuns(content).map(r => {
+      if (r instanceof TextRun) return r;
+      return R(String(r),{bold:isHdr,color:col,size:20});
+    });
+    const boldRuns = runs.map(tr => {
+      if (isHdr && tr.options) tr.options.bold = true;
+      return tr;
+    });
+    paras = [new Paragraph({ children: mkRuns(content).map(x=>typeof x==='string'? R(x,{bold:isHdr,color:col,size:20}) : x), spacing:{before:40,after:40} })];
+  }
+  return new TableCell({
+    borders:BALL,
+    width: w?{size:w,type:WidthType.DXA}:undefined,
+    shading:{fill,type:ShadingType.CLEAR},
+    margins:CMARG,
+    children:paras
+  });
+}
+
+function TR(cells, widths, isHdr=false, isAlt=false) {
+  return new TableRow({
+    tableHeader:isHdr,
+    children: cells.map((c,i)=>TC(c,isHdr,widths[i],isAlt))
+  });
+}
+
+function TBL(rows, widths) {
+  const total=widths.reduce((a,b)=>a+b,0);
+  return new Table({
+    width:{size:total,type:WidthType.DXA},
+    columnWidths:widths,
+    rows: rows.map((row,ri)=>TR(row,widths,ri===0,ri>0&&ri%2===0))
+  });
+}
+
+// For cells needing multiple paragraphs
+function TCm(paragraphs, isHdr=false, w=0, isAlt=false) {
+  const fill = isHdr?HDR:isAlt?ALT:'FFFFFF';
+  return new TableCell({ borders:BALL, width:w?{size:w,type:WidthType.DXA}:undefined, shading:{fill,type:ShadingType.CLEAR}, margins:CMARG, children:paragraphs });
+}
+
+function TBLm(rowFn, widths) {
+  const total=widths.reduce((a,b)=>a+b,0);
+  return new Table({ width:{size:total,type:WidthType.DXA}, columnWidths:widths, rows:rowFn(widths) });
+}
+
+// === DOCUMENT CONTENT ===
+const ch = [];
+
+// Helper to add section label
+function sec(label) { ch.push(P([Rb('Model Answer')])); }
+function qa(num,title,source,content) {
+  ch.push(H3(`${num}  ${title}`));
+  ch.push(SRC(source));
+  content.forEach(x=>ch.push(x));
+  ch.push(Pempty());
+}
+
+// ─────────────── TITLE PAGE ───────────────
+ch.push(Pempty(),Pempty(),Pempty());
+ch.push(new Paragraph({alignment:AlignmentType.CENTER,children:[R('BACH3123',{bold:true,size:64,color:'1F4E79'})],spacing:{before:0,after:200}}));
+ch.push(new Paragraph({alignment:AlignmentType.CENTER,children:[R('Analytical Method Development and Validation',{bold:true,size:36,color:'2E75B6'})],spacing:{before:0,after:200}}));
+ch.push(new Paragraph({alignment:AlignmentType.CENTER,children:[R('Complete Past-Year Questions & Model Answers',{bold:true,size:30})],spacing:{before:0,after:300}}));
+ch.push(new Paragraph({alignment:AlignmentType.CENTER,children:[R('Organised by Topic Category',{italics:true,size:26,color:'666666'})],spacing:{before:0,after:600}}));
+ch.push(new Paragraph({alignment:AlignmentType.CENTER,children:[R('Tunku Abdul Rahman University of Management and Technology',{size:24})],spacing:{before:0,after:80}}));
+ch.push(new Paragraph({alignment:AlignmentType.CENTER,children:[R('Faculty of Applied Sciences | Bachelor of Science (Hons) Analytical Chemistry',{italics:true,size:22})],spacing:{before:0,after:80}}));
+ch.push(new Paragraph({alignment:AlignmentType.CENTER,children:[R('Examination Papers Covered: 2021/2022 – 2024/2025',{size:22})],spacing:{before:0,after:0}}));
+ch.push(PB());
+
+// ─────────────── CATEGORY 1 ───────────────
+ch.push(H1('Category 1 – Method Validation & Verification Concepts'));
+
+ch.push(H2('Q1.1  Differentiate between Verification and Validation.'));
+ch.push(SRC('May/Jun 2025 Q1a; Apr/May 2022 Q1a'));
+ch.push(TBL([
+  ['Aspect','Validation','Verification'],
+  ['Definition',
+   'Process of establishing documented evidence that a new analytical method is fit for its intended purpose (proves the method works).',
+   'Process of confirming that an existing/transferred validated method can be performed correctly in a new laboratory using the same procedure.'],
+  ['When Applied','Applied to a NEW method developed for the first time.','Applied to an EXISTING validated method being adopted by another lab.'],
+  ['Scope',
+   'Comprehensive testing of all applicable validation parameters (specificity, linearity, LOD, LOQ, accuracy, precision, robustness, etc.).',
+   'Subset of validation tests – only relevant parameters are checked (e.g., accuracy, precision, specificity).'],
+  ['Documentation','Full validation report required.','Verification report required.'],
+  ['Example','Developing a new HPLC method for octinoxate in sunblock.','Transferring the validated SLS method to determine octinoxate in sunblock.'],
+],[2000,3500,3500]));
+ch.push(Pempty());
+
+ch.push(H2('Q1.2  Identify TWO verification tests for (i) active ingredient and (ii) impurity content.'));
+ch.push(SRC('May/Jun 2025 Q1b'));
+ch.push(P([Rb('(i) Active ingredient – octinoxate in sunblock:')]));
+ch.push(bull('Accuracy and Precision (Repeatability) — confirm the method can reliably quantify the active ingredient in the new matrix.'));
+ch.push(P([Rb('(ii) Impurity content – benzophenone in sunblock:')]));
+ch.push(bull('Specificity and Limit of Detection (LOD) / Limit of Quantification (LOQ) — confirm the method can distinguish and detect the low-level impurity.'));
+ch.push(Pempty());
+
+ch.push(H2('Q1.3  Identify Organisation Y – the most relevant standard body for chemical analytical laboratories.'));
+ch.push(SRC('May/Jun 2025 Q1c'));
+ch.push(P([Rb('Organisation Y = ISO/IEC 17025')]));
+ch.push(P('(International Organization for Standardization / International Electrotechnical Commission). ISO/IEC 17025 specifies the general requirements for the competence, impartiality and consistent operation of testing and calibration laboratories. It is the primary standard used globally for laboratory accreditation.'));
+ch.push(Pempty());
+
+ch.push(H2('Q1.4  Can ISO/IEC 17025 method validation be implemented in a pharmaceutical laboratory?'));
+ch.push(P('Yes, but with modification. ISO/IEC 17025 provides a general quality framework applicable across many sectors. However, pharmaceutical laboratories are primarily governed by ICH guidelines (e.g., ICH Q2(R1) for analytical validation) and regulatory bodies such as the FDA and EMA. ISO/IEC 17025 can complement ICH guidelines but ICH Q2(R1) must take precedence for pharmaceutical analytical method validation.'));
+ch.push(Pempty());
+
+ch.push(H2('Q1.5  Name THREE levels of precision, contrast their differences, and state replicates for repeatability.'));
+ch.push(SRC('May/Jun 2025 Q1d; May/Jun 2024 Q3e; Oct 2021 Q1'));
+ch.push(P([Rb('(a) Number of replicates for repeatability:')]));
+ch.push(bull([Rb('100% pure target: '), R('minimum 9 replicates (e.g., 3 concentrations × 3 replicates each).')],0));
+ch.push(bull([Rb('NOT 100% pure: '), R('minimum 9 determinations covering the specified range (e.g., 3 levels × 3 replicates at 80%, 100%, and 120% of target concentration).')],0));
+ch.push(Pempty());
+ch.push(P([Rb('(b) Three levels of precision:')]));
+ch.push(TBL([
+  ['Level','Name','Definition','Conditions'],
+  ['1','Repeatability\n(Intra-assay precision)',
+   'Closeness of agreement between repeated measurements of the same sample under the SAME conditions.',
+   'Same analyst, same instrument, same reagent lot, same laboratory, performed within a short time period (typically one day).'],
+  ['2','Intermediate Precision\n(Within-laboratory precision)',
+   'Closeness of agreement between measurements conducted within the SAME laboratory but under DIFFERENT conditions.',
+   'Different days, different analysts, or different instruments within the same laboratory.'],
+  ['3','Reproducibility\n(Inter-laboratory precision)',
+   'Closeness of agreement between results obtained in DIFFERENT laboratories.',
+   'Collaborative studies; used for standardisation of methods across labs (e.g., pharmacopoeial methods).'],
+],[1000,2300,3000,2700]));
+ch.push(Pempty());
+
+ch.push(H2('Q1.6  Compare RUGGEDNESS and ROBUSTNESS tests.'));
+ch.push(SRC('May/Jun 2024 Q1e'));
+ch.push(TBL([
+  ['Aspect','Ruggedness','Robustness'],
+  ['Definition',
+   'Degree of reproducibility of test results obtained under a variety of normal laboratory conditions (different labs, analysts, instruments, reagents, days).',
+   'The capacity of an analytical method to remain unaffected by small, deliberate variations in method parameters.'],
+  ['Purpose',
+   'Tests whether the method can be reliably reproduced in different laboratories or by different analysts without modification.',
+   'Tests the sensitivity of a method to deliberate, planned parameter changes to identify critical parameters that must be controlled.'],
+  ['Variables Changed',
+   'Inter-laboratory variables: analyst, instrument, reagent lot, laboratory environment.',
+   `Intra-method variables: pH ${PM}0.2, flow rate ${PM}0.1 mL/min, column temperature ${PM}5${DEG}C, mobile phase composition ${PM}5%, etc.`],
+  ['Guideline','USP (United States Pharmacopeia) uses "ruggedness".','ICH Q2(R1) uses "robustness".'],
+],[2000,3500,3500]));
+ch.push(Pempty());
+
+ch.push(H2('Q1.7  Suggest an official guideline and identify EIGHT validation tests in proper sequence.'));
+ch.push(SRC('Oct 2024 Q1a'));
+ch.push(P([Rb('Guideline: '), R('ICH Q2(R1) – Validation of Analytical Procedures: Text and Methodology')]));
+ch.push(TBL([
+  ['No.','Validation Test','Brief Explanation'],
+  ['1','Specificity / Selectivity','Confirm the method measures only the analyte of interest without interference from matrix components, degradation products, or excipients.'],
+  ['2','Linearity & Range','Demonstrate proportional response over the working range (e.g., r ≥ 0.999 for assay).'],
+  ['3','Limit of Detection (LOD)','Smallest detectable amount (S/N = 3 or 3.3σ/slope).'],
+  ['4','Limit of Quantification (LOQ)','Smallest reliably quantifiable amount (S/N = 10 or 10σ/slope).'],
+  ['5','Accuracy (Trueness)','Closeness of measured value to true value; expressed as % recovery (98–102% for assay).'],
+  ['6','Repeatability','Intra-day precision: ≥6 replicates or 3 concentrations × 3 replicates.'],
+  ['7','Intermediate Precision','Inter-day or inter-analyst precision within the same laboratory.'],
+  ['8','Robustness','Deliberate variation of method parameters to identify critical factors.'],
+],[800,2800,5400]));
+ch.push(Pempty());
+
+ch.push(H2('Q1.8  Nucleon Pharmacy transferring a method from KL to Johor Bahru: (i) transfer method, (ii) waiver.'));
+ch.push(SRC('Oct 2024 Q1b'));
+ch.push(P([Rb('(i) Recommended transfer method: Comparative Testing')]));
+ch.push(P('The sending laboratory (KL) and the receiving laboratory (JB) both analyse the same set of samples using the same method. Results are compared statistically (F-test for variance, t-test for means) to confirm equivalence.'));
+ch.push(P([Rb('(ii) Transfer Waiver – the JB branch may apply if:')]));
+ch.push(bull('The method was developed by the same company and the receiving lab was involved in the original development (co-development waiver).'));
+ch.push(bull('The method is a compendial (pharmacopoeial) method already widely established.'));
+ch.push(bull('A comprehensive validation was recently conducted under exactly the same conditions applicable to the receiving site.'));
+ch.push(bull('The waiver request must be documented with scientific justification, risk assessment, and supporting data.'));
+ch.push(Pempty());
+
+ch.push(H2('Q1.9  Draw a diagram to explain reliability, probability and variability (accuracy, precision, dispersion).'));
+ch.push(SRC('May/Jun 2025 Q1e'));
+ch.push(P('The classic target diagram illustrates these three concepts:'));
+ch.push(bull([Rb('Reliability (Accuracy/Trueness): '), R('How close the average of measurements is to the TRUE value. High accuracy = measurements cluster near the centre of the target.')]));
+ch.push(bull([Rb('Probability (Precision): '), R('The likelihood that repeated measurements give the same result. High precision = tight clustering of data points, regardless of proximity to true value.')]));
+ch.push(bull([Rb('Variability (Dispersion/Spread): '), R('The scatter of repeated measurements. Low variability → high precision; high variability → low precision.')]));
+ch.push(TBL([
+  ['Scenario','Accuracy','Precision'],
+  ['Tight cluster near centre (all near bull\'s eye)','HIGH','HIGH'],
+  ['Scattered cluster near centre','HIGH','LOW'],
+  ['Tight cluster, off-centre (biased but consistent)','LOW','HIGH'],
+  ['Scattered and off-centre (biased and variable)','LOW','LOW'],
+],[4000,2500,2500]));
+ch.push(Pempty());
+
+ch.push(PB());
+
+// ─────────────── CATEGORY 2 ───────────────
+ch.push(H1('Category 2 – Validation Parameters: Specificity, Linearity, Precision & Accuracy'));
+
+ch.push(H2('Q2.1  What is SPECIFICITY/SELECTIVITY and how is it validated in an HPLC method?'));
+ch.push(SRC('Oct 2022 Q1; Oct 2021 Q4; May/Jun 2023 Q4d; Oct 2023 Q3d'));
+ch.push(P([Rb('Definition: '), R('Specificity (or selectivity) is the ability of an analytical method to measure accurately and specifically the analyte of interest in the presence of other components such as impurities, degradation products, related substances, matrix components, or excipients.')]));
+ch.push(P([Rb('How to validate (HPLC method):')]));
+ch.push(bull('Prepare samples containing: (a) pure analyte only, (b) analyte + known impurities/degradants, (c) blank matrix (without analyte), and (d) stressed/degraded samples (acid, base, oxidative, photolytic, thermal).'));
+ch.push(bull('Inject all samples and compare chromatograms. The analyte peak must be resolved (peak purity assessed by UV-DAD or MS) from all other peaks.'));
+ch.push(bull('Instruments: HPLC with UV detector, PDA (photodiode array detector), or HPLC-MS for peak purity confirmation.'));
+ch.push(bull([Rb('Acceptance criteria (ICH Q2(R1)): '), R('Peak purity angle < peak purity threshold; no co-eluting peaks; chromatographic resolution (R'), Rsub('s'), R(') ≥ 2 between the analyte and nearest interfering peak.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q2.2  What is LINEARITY and what are the acceptance criteria?'));
+ch.push(SRC('May/Jun 2023 Q1b; Oct 2022 Q3'));
+ch.push(P([Rb('Definition: '), R('Linearity is the ability of the method to obtain test results that are directly proportional to the concentration of the analyte within a given range.')]));
+ch.push(P('Prepare a minimum of 5 calibration standards at different concentrations spanning the intended range. Plot response (y) vs concentration (x) and perform linear regression: y = bx + a.'));
+ch.push(TBL([
+  ['Parameter','Requirement / Acceptance Criterion'],
+  ['Correlation coefficient (r)','r ≥ 0.999 (assay);  r ≥ 0.99 (impurity)'],
+  ['Coefficient of determination (r²)','r² ≥ 0.998'],
+  ['y-intercept (a)','Should pass through origin or intercept is not significantly different from zero'],
+  ['Residual standard deviation (%RSD)','≤ 2% for assay;  ≤ 5% for impurities'],
+  ['Minimum data points','At least 5 concentration levels'],
+],[3500,5500]));
+ch.push(Pempty());
+
+ch.push(H2('Q2.3  Do the ACCURACY results for Ticagrelor fulfil the ICH acceptance criteria?'));
+ch.push(SRC('May/Jun 2025 Q4c'));
+ch.push(TBL([
+  ['Actual Conc. (ng/mL)','Mean Recovered (ng/mL)','% Recovery','Acceptance (±15%)','Result'],
+  ['100','82.5','82.5%','85–115%','FAIL'],
+  ['200','222.7','111.4%','85–115%','PASS'],
+  ['400','406.7','101.7%','85–115%','PASS'],
+  ['600','580.0','96.7%','85–115%','PASS'],
+  ['800','808.1','101.0%','85–115%','PASS'],
+  ['1000','997.1','99.7%','85–115%','PASS'],
+],[1800,2000,1700,1800,1700]));
+ch.push(P([Rb('Conclusion: '), R('The 100 ng/mL level gives 82.5% recovery, below the 85% lower limit — this level FAILS. Even with the relaxed LLOQ criterion of ±20% (80–120%), 82.5% is still outside the range. All other concentration levels (200–1000 ng/mL) fall within ±15% and PASS. Overall, 5 out of 6 levels pass.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q2.4  Do the PRECISION results for Ticagrelor fulfil the ICH acceptance criteria?'));
+ch.push(SRC('May/Jun 2025 Q4d'));
+ch.push(P(['ICH M10 acceptance criteria: %RSD ≤ 15% at each QC level (or ≤ 20% at the LLOQ level).']));
+ch.push(TBL([
+  ['Actual (ng/mL)','Mean (ng/mL)','SD (ng/mL)','%RSD','Criterion','Result'],
+  ['100','82.5','5.1','6.18%','≤ 15%','PASS'],
+  ['200','222.7','2.7','1.21%','≤ 15%','PASS'],
+  ['400','406.7','12.0','2.95%','≤ 15%','PASS'],
+  ['600','580.0','15.9','2.74%','≤ 15%','PASS'],
+  ['800','808.1','5.9','0.73%','≤ 15%','PASS'],
+  ['1000','997.1','0.8','0.08%','≤ 15%','PASS'],
+],[1500,1700,1600,1500,1500,1200]));
+ch.push(P([Rb('Conclusion: '), R('All six levels show %RSD well below 15%. The precision results fully fulfil ICH acceptance criteria.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q2.5  Is it necessary to evaluate MATRIX EFFECT in bioanalytical studies?'));
+ch.push(SRC('May/Jun 2025 Q4e'));
+ch.push(P('Yes, matrix effect must be evaluated in bioanalytical method validation. Biological matrices (plasma, blood, urine, tissues) contain endogenous compounds (phospholipids, proteins, salts) that can suppress or enhance ionisation of the analyte, leading to inaccurate quantification. This is critical in LC-MS/MS methods where ion suppression/enhancement directly affects the signal.'));
+ch.push(bull([Rb('How to evaluate: '), R('Compare the analyte signal in neat solvent vs analyte spiked into blank extracted matrix (post-extraction spike). Matrix Factor (MF) = peak area in matrix ÷ peak area in neat solvent. MF normalised with internal standard should be between 0.85 and 1.15.')]));
+ch.push(bull([Rb('ICH M10 requirement: '), R('Matrix effect must be assessed using a minimum of 6 individual lots of biological matrix. An MF outside 0.85–1.15 indicates the method needs modification.')]));
+ch.push(Pempty());
+
+ch.push(PB());
+
+// ─────────────── CATEGORY 3 ───────────────
+ch.push(H1('Category 3 – Limit of Detection (LOD) & Limit of Quantification (LOQ) Calculations'));
+
+ch.push(P([Rb('Key Formulae:')]));
+ch.push(P(['LOD = 3.3 × ', Rf('σ'), ' / slope          LOQ = 10 × ', Rf('σ'), ' / slope']));
+ch.push(P(['where ', Rf('σ'), ' = SD of lowest standard (or SD of y-intercept from regression), and slope = b from calibration equation y = bx + a.']));
+ch.push(Pempty());
+
+ch.push(H2('Q3.1  Calculate LOD and LOQ of AMP and SUL.'));
+ch.push(SRC('May/Jun 2025 Q3c'));
+ch.push(TBL([
+  ['Compound','Linearity Equation','SD of Lowest Std (µg/mL)'],
+  ['AMP (Amprolium)','y = 14.933x + 14.878','8.462'],
+  ['SUL (Sulfaquinoxaline)','y = 60.621x + 14.148','3.858'],
+],[2200,4200,2600]));
+ch.push(P([Rb('For AMP'), R(' (slope = 14.933, σ = 8.462):')]));
+ch.push(P(['LOD = 3.3 × 8.462 / 14.933 = 27.925 / 14.933 = ', Rb('1.870 µg/mL')]));
+ch.push(P(['LOQ = 10 × 8.462 / 14.933 = 84.62 / 14.933 = ', Rb('5.667 µg/mL')]));
+ch.push(P([Rb('For SUL'), R(' (slope = 60.621, σ = 3.858):')]));
+ch.push(P(['LOD = 3.3 × 3.858 / 60.621 = 12.731 / 60.621 = ', Rb('0.2100 µg/mL')]));
+ch.push(P(['LOQ = 10 × 3.858 / 60.621 = 38.58 / 60.621 = ', Rb('0.6365 µg/mL')]));
+ch.push(Pempty());
+ch.push(TBL([
+  ['Compound','LOD (µg/mL)','LOQ (µg/mL)'],
+  ['AMP','1.870','5.667'],
+  ['SUL','0.210','0.637'],
+],[3000,3000,3000]));
+ch.push(Pempty());
+
+ch.push(H2('Q3.2  Evaluate reliability of AMP (6.0 µg/mL) and SUL (0.5 µg/mL) concentrations.'));
+ch.push(SRC('May/Jun 2025 Q3e'));
+ch.push(TBL([
+  ['Compound','Reported Conc.','LOD','LOQ','Detectable?','Quantifiable?','Verdict'],
+  ['AMP','6.0 µg/mL','1.870 µg/mL','5.667 µg/mL','YES (6.0 > LOD)','YES (6.0 > LOQ)','RELIABLE'],
+  ['SUL','0.5 µg/mL','0.210 µg/mL','0.637 µg/mL','YES (0.5 > LOD)','NO (0.5 < LOQ)','NOT RELIABLY QUANTIFIABLE'],
+],[1500,1500,1600,1600,1600,1600,1600]));
+ch.push(bull([Rb('AMP at 6.0 µg/mL: '), R('6.0 > LOQ (5.667 µg/mL) → concentration can be accurately and precisely quantified. The reported value is RELIABLE.')]));
+ch.push(bull([Rb('SUL at 0.5 µg/mL: '), R('0.5 > LOD (0.210) → compound can be DETECTED. However, 0.5 < LOQ (0.637 µg/mL) → concentration CANNOT be reliably quantified. The value is not reliable for quantification; it can only confirm presence.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q3.3  Calculate LOD and LOQ of Favipiravir (FAV).'));
+ch.push(SRC('Oct 2024 Q3b; May/Jun 2023 Q4b'));
+ch.push(P('Linearity equation: y = 3172x + 8898;  SD of intercept (σ) = 982.60 µg/mL'));
+ch.push(P(['LOD = 3.3 × 982.60 / 3172 = 3242.58 / 3172 = ', Rb('1.022 µg/mL')]));
+ch.push(P(['LOQ = 10 × 982.60 / 3172 = 9826.0 / 3172 = ', Rb('3.097 µg/mL')]));
+ch.push(Pempty());
+
+ch.push(H2('Q3.4  Evaluate reliability of reported FAV concentrations (2.0–3.5 µg/mL).'));
+ch.push(SRC('Oct 2024 Q3e'));
+ch.push(bull(['All values ≥ 2.0 µg/mL are above LOD (1.022 µg/mL) → FAV can be DETECTED throughout the range.']));
+ch.push(bull(['Lower end (2.0–3.097 µg/mL) is below LOQ → values in this region can be detected but CANNOT be reliably quantified.']));
+ch.push(bull(['Upper end (3.097–3.5 µg/mL) is above LOQ → can be reliably quantified.']));
+ch.push(P([Rb('Conclusion: '), R('Only partially reliable. The lower portion (2.0–3.0 µg/mL) lies between LOD and LOQ and should not be used for quantitative reporting. The method should be re-optimised to lower the LOQ, or the reported range restricted to ≥ 3.097 µg/mL.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q3.5  Calculate LOD and LOQ of Pyrazinamide (PZ).'));
+ch.push(SRC('May/Jun 2024 Q3b'));
+ch.push(P('Linearity equation: y = 0.0659x − 0.006;  σ = 0.000314 µg/mL'));
+ch.push(P(['LOD = 3.3 × 0.000314 / 0.0659 = 0.001036 / 0.0659 = ', Rb('0.01572 µg/mL')]));
+ch.push(P(['LOQ = 10 × 0.000314 / 0.0659 = 0.00314 / 0.0659 = ', Rb('0.04765 µg/mL')]));
+ch.push(Pempty());
+
+ch.push(H2('Q3.6  Calculate LOD and LOQ of Belzutifan (BF).'));
+ch.push(SRC('Oct 2023 Q3b'));
+ch.push(P('Linearity equation: y = 8909x + 979.40;  σ = 782.90 µg/mL'));
+ch.push(P(['LOD = 3.3 × 782.90 / 8909 = 2583.57 / 8909 = ', Rb('0.2901 µg/mL')]));
+ch.push(P(['LOQ = 10 × 782.90 / 8909 = 7829.0 / 8909 = ', Rb('0.8789 µg/mL')]));
+ch.push(Pempty());
+
+ch.push(H2('Q3.7  Calculate LOD and LOQ of Hydrazinocurcumin (HC).'));
+ch.push(SRC('Oct 2021 Q3d'));
+ch.push(P('Linearity equation: y = 0.0023x + 0.0255;  σ = 0.000115 µg/mL'));
+ch.push(P(['LOD = 3.3 × 0.000115 / 0.0023 = 0.0003795 / 0.0023 = ', Rb('0.1650 µg/mL')]));
+ch.push(P(['LOQ = 10 × 0.000115 / 0.0023 = 0.00115 / 0.0023 = ', Rb('0.5000 µg/mL')]));
+ch.push(Pempty());
+
+ch.push(H2('Q3.8  HC plasma concentration = 0.30 µg/mL. LOD = 0.165 µg/mL, LOQ = 0.500 µg/mL. Evaluate reliability.'));
+ch.push(SRC('Oct 2021 Q3e'));
+ch.push(bull('0.30 µg/mL > LOD (0.165 µg/mL) → HC can be DETECTED.'));
+ch.push(bull('0.30 µg/mL < LOQ (0.500 µg/mL) → concentration cannot be reliably QUANTIFIED.'));
+ch.push(P([Rb('Conclusion: '), R('The result is not reliable for quantitative reporting. The analyst can only confirm HC is present above the LOD. The sample should be concentrated to bring it above the LOQ, or the method re-optimised to lower the LOQ.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q3.9  Highest HQ concentration in cream XYZ = 10.0 µg/mL. LOD = 2.6 µg/mL, LOQ = 14.0 µg/mL. Acceptable?'));
+ch.push(SRC('May/Jun 2024 Q4d'));
+ch.push(bull('10.0 µg/mL > LOD (2.6 µg/mL) → Hydroquinone can be DETECTED.'));
+ch.push(bull('10.0 µg/mL < LOQ (14.0 µg/mL) → 10.0 µg/mL falls BELOW the LOQ.'));
+ch.push(P([Rb('Conclusion: NOT acceptable for quantification. '), R('Accurate quantification is not possible at this concentration. The method should be improved (optimise sample preparation, increase injection volume, or use a more sensitive detector) to lower the LOQ below 10.0 µg/mL.')]));
+ch.push(Pempty());
+
+ch.push(PB());
+
+// ─────────────── CATEGORY 4 ───────────────
+ch.push(H1('Category 4 – Statistical Significance Tests'));
+
+ch.push(H2('Q4.1  PAIRED t-TEST: Boron content in tea samples.'));
+ch.push(SRC('May/Jun 2025 Q2a'));
+ch.push(P('Determine whether the mean boron content is significantly different between the Standard and Extreme Pressure techniques.'));
+ch.push(TBL([
+  ['Standard Technique (mg/kg)','Extreme Pressure Technique (mg/kg)','Difference d'],
+  ['12.8','13.5','−0.7'],
+  ['14.0','10.8','+3.2'],
+  ['13.4','15.2','−1.8'],
+  ['13.9','12.9','+1.0'],
+],[3000,3500,2500]));
+ch.push(Pempty());
+ch.push(P([Rb('Step 1: Calculate differences '), Rf(`d = Standard − Extreme Pressure`)]));
+ch.push(P([`d${s1} = 12.8 − 13.5 = −0.7;   d${s2} = 14.0 − 10.8 = +3.2;   d${s3} = 13.4 − 15.2 = −1.8;   d${s4} = 13.9 − 12.9 = +1.0`]));
+ch.push(P([Rb(`Step 2: Mean difference (${DBAR})`)]));
+ch.push(P([`${DBAR} = (−0.7 + 3.2 − 1.8 + 1.0) / 4 = 1.7 / 4 = `, Rb('0.425 mg/kg')]));
+ch.push(P([Rb('Step 3: Standard deviation of differences (s'), Rb('d'), Rb(')')]));
+ch.push(P([`(d${s1}−${DBAR})${sup2} = (−0.7−0.425)${sup2} = (−1.125)${sup2} = 1.2656`]));
+ch.push(P([`(d${s2}−${DBAR})${sup2} = (3.2−0.425)${sup2} = (2.775)${sup2} = 7.7006`]));
+ch.push(P([`(d${s3}−${DBAR})${sup2} = (−1.8−0.425)${sup2} = (−2.225)${sup2} = 4.9506`]));
+ch.push(P([`(d${s4}−${DBAR})${sup2} = (1.0−0.425)${sup2} = (0.575)${sup2} = 0.3306`]));
+ch.push(P([`Σ(d−${DBAR})${sup2} = 1.2656 + 7.7006 + 4.9506 + 0.3306 = 14.2474`]));
+ch.push(P([`s`, Rsub('d'), ` = ${SQRT}(14.2474 / 3) = ${SQRT}4.7491 = `, Rb('2.179 mg/kg')]));
+ch.push(P([Rb('Step 4: Calculate t'), Rb('calc')]));
+ch.push(P([`t`, Rsub('calc'), ` = ${DBAR}${SQRT}n / s`, Rsub('d'), ` = 0.425 × ${SQRT}4 / 2.179 = 0.425 × 2 / 2.179 = 0.850 / 2.179 = `, Rb('0.390')]));
+ch.push(P([Rb('Step 5: Compare with t'), Rb('crit')]));
+ch.push(P([`df = n − 1 = 3;   t`, Rsub('crit'), ` (3 df, 95%, two-tailed) = 3.182`]));
+ch.push(P([Rb(`t`), Rb('calc'), Rb(' (0.390) < t'), Rb('crit'), Rb(' (3.182)')]));
+ch.push(P([Rb('Conclusion: '), R(`Since t`), Rsub('calc'), R(` < t`), Rsub('crit'), R(`, we fail to reject ${H0}. There is NO significant difference between the mean boron content measured by the two techniques at the 95% confidence level.`)]));
+ch.push(Pempty());
+
+ch.push(H2('Q4.2  F-TEST then t-TEST: Fluoride in toothpaste – does the proposed method show greater precision?'));
+ch.push(SRC('Oct 2024 Q2a'));
+ch.push(TBL([
+  ['Method','Data (ppm)','n'],
+  ['Current','1450, 1422, 1468, 1432','4'],
+  ['Proposed','1448, 1432, 1427, 1447','4'],
+],[2000,5500,1500]));
+ch.push(P([Rb('Step 1: Calculate means and standard deviations')]));
+ch.push(P([`${XBAR}`, Rsub('C'), ` = (1450+1422+1468+1432)/4 = `, Rb('1443.0 ppm')]));
+ch.push(P([`${XBAR}`, Rsub('P'), ` = (1448+1432+1427+1447)/4 = `, Rb('1438.5 ppm')]));
+ch.push(P([`s`, Rsub('C'), ` = ${SQRT}[(7${sup2}+21${sup2}+25${sup2}+11${sup2})/3] = ${SQRT}(1236/3) = ${SQRT}412 = `, Rb('20.30 ppm')]));
+ch.push(P([`s`, Rsub('P'), ` = ${SQRT}[(9.5${sup2}+6.5${sup2}+11.5${sup2}+8.5${sup2})/3] = ${SQRT}(337/3) = ${SQRT}112.33 = `, Rb('10.60 ppm')]));
+ch.push(P([Rb(`Step 2: F-test  (${H0}: ${sig1sq} = ${sig2sq})`)]));
+ch.push(P([`F`, Rsub('calc'), ` = s`, Rsub('C'), `${sup2} / s`, Rsub('P'), `${sup2} = 412 / 112.33 = `, Rb('3.668')]));
+ch.push(P([`F`, Rsub('crit'), ` (${nu1}=3, ${nu2}=3, two-tailed, P=0.05) = 15.44`]));
+ch.push(P([`F`, Rsub('calc'), ` (3.668) < F`, Rsub('crit'), ` (15.44) ${ARR} fail to reject ${H0} → variances are NOT significantly different at the 95% confidence level. However, the proposed method (s = 10.60) shows lower variation than the current method (s = 20.30), suggesting greater precision in practice.`]));
+ch.push(Pempty());
+
+ch.push(H2('Q4.3  ONE-SAMPLE t-TEST: Linoleic acid in waste cooking oil (true value = 39.74 mg/L).'));
+ch.push(SRC('Oct 2024 Q2b'));
+ch.push(P('Sample data: 40.01, 40.80, 39.78, 39.76, 39.88 mg/L'));
+ch.push(P([`n = 5;   µ = 39.74 mg/L;   ${XBAR} = (40.01+40.80+39.78+39.76+39.88)/5 = 200.23/5 = `, Rb('40.046 mg/L')]));
+ch.push(P([`s = ${SQRT}[(0.036${sup2}+0.754${sup2}+0.266${sup2}+0.286${sup2}+0.166${sup2})/4] = ${SQRT}(0.74992/4) = ${SQRT}0.18748 = `, Rb('0.4330 mg/L')]));
+ch.push(P([`t`, Rsub('calc'), ` = (${XBAR} − µ)${SQRT}n / s = (40.046 − 39.74) × ${SQRT}5 / 0.4330 = 0.306 × 2.2361 / 0.4330 = `, Rb('1.580')]));
+ch.push(P([`df = 4;   t`, Rsub('crit'), ` (4 df, 95%, two-tailed) = 2.776`]));
+ch.push(P([`t`, Rsub('calc'), ` (1.580) < t`, Rsub('crit'), ` (2.776)`]));
+ch.push(P([Rb('Conclusion: '), R(`${XBAR} is not significantly different from the true value (µ = 39.74 mg/L). There is NO evidence of systematic error (positive or negative).`)]));
+ch.push(Pempty());
+
+ch.push(H2('Q4.4  GRUBBS TEST: Chlorophyll peak of papaya leaves.'));
+ch.push(SRC('Oct 2024 Q2c'));
+ch.push(TBL([
+  ['Instrument','Data (nm)'],
+  ['Single-beam','556, 586, 543, 551'],
+  ['Dual-beam','551, 554, 543, 540'],
+],[3000,6000]));
+ch.push(P([Rb('Step 1: '), R('The known chlorophyll peak wavelength is approximately 550 nm. The single-beam data contains 586 nm, far from 550 nm. The single-beam data set is inaccurate — 586 nm is the suspected outlier.')]));
+ch.push(P([Rb('Step 2: Grubbs test on single-beam data (556, 586, 543, 551)')]));
+ch.push(P([`${XBAR} = (556+586+543+551)/4 = 2236/4 = 559.0 nm`]));
+ch.push(P([`s = ${SQRT}[(9+729+256+64)/3] = ${SQRT}(1058/3) = ${SQRT}352.67 = 18.78 nm`]));
+ch.push(P([`G`, Rsub('calc'), ` = |586 − 559| / 18.78 = 27 / 18.78 = `, Rb('1.438')]));
+ch.push(P([`G`, Rsub('crit'), ` (n=4, two-sided, P=0.05) = 1.481`]));
+ch.push(P([`G`, Rsub('calc'), ` (1.438) < G`, Rsub('crit'), ` (1.481)`]));
+ch.push(P([Rb('Conclusion: '), R('The value 586 nm should be RETAINED. It is not a statistically significant outlier at the 95% confidence level.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q4.5  UNPAIRED t-TEST: Sodium levels in teenagers vs retired adults.'));
+ch.push(SRC('May/Jun 2024 Q2a'));
+ch.push(P([`${H0}: The mean sodium levels of teenagers and retired adults are the SAME.`]));
+ch.push(TBL([
+  ['Group','Data (mmol/L)'],
+  ['Teenagers','55.5, 60.2, 58.7, 55.2'],
+  ['Retired Adults','65.2, 73.2, 68.5, 83.8'],
+],[3000,6000]));
+ch.push(P([Rb('Step 1: Means and standard deviations')]));
+ch.push(P([`${XBAR}`, Rsub('T'), ` = (55.5+60.2+58.7+55.2)/4 = 229.6/4 = `, Rb('57.40 mmol/L')]));
+ch.push(P([`${XBAR}`, Rsub('R'), ` = (65.2+73.2+68.5+83.8)/4 = 290.7/4 = `, Rb('72.675 mmol/L')]));
+ch.push(P([`s`, Rsub('T'), `${sup2} = (3.61+7.84+1.69+4.84)/3 = 17.98/3 = 5.993;   s`, Rsub('T'), ` = 2.448`]));
+ch.push(P([`s`, Rsub('R'), `${sup2} = (55.875+0.276+17.430+123.765)/3 = 197.346/3 = 65.78;   s`, Rsub('R'), ` = 8.110`]));
+ch.push(P([Rb(`Step 2: F-test  (${H0}: ${sig1sq} = ${sig2sq})`)]));
+ch.push(P([`F`, Rsub('calc'), ` = s`, Rsub('R'), `${sup2} / s`, Rsub('T'), `${sup2} = 65.78 / 5.993 = 10.97`]));
+ch.push(P([`F`, Rsub('crit'), ` (${nu1}=3, ${nu2}=3, two-tailed, P=0.05) = 15.44`]));
+ch.push(P([`F`, Rsub('calc'), ` (10.97) < F`, Rsub('crit'), ` (15.44) ${ARR} variances NOT significantly different ${ARR} use POOLED t-test`]));
+ch.push(P([Rb('Step 3: Pooled t-test')]));
+ch.push(P([`s`, Rsup('2'), Rsub('pooled'), ` = [(n${s1}−1)s${s1}${sup2} + (n${s2}−1)s${s2}${sup2}] / (n${s1}+n${s2}−2)`]));
+ch.push(P([`= [3 × 5.993 + 3 × 65.78] / (4+4−2) = [17.979 + 197.34] / 6 = 215.319/6 = 35.887`]));
+ch.push(P([`s`, Rsub('pooled'), ` = ${SQRT}35.887 = 5.991`]));
+ch.push(P([`t`, Rsub('calc'), ` = (${XBAR}`, Rsub('T'), ` − ${XBAR}`, Rsub('R'), `) / [s`, Rsub('pooled'), ` × ${SQRT}(1/${n1} + 1/${n2})]`]));
+ch.push(P([`= (57.40 − 72.675) / [5.991 × ${SQRT}(0.5)] = −15.275 / [5.991 × 0.7071] = −15.275 / 4.237 = `, Rb('−3.605')]));
+ch.push(P([`|t`, Rsub('calc'), `| = 3.605;   df = 6;   t`, Rsub('crit'), ` (6 df, 95%, two-tailed) = 2.447`]));
+ch.push(P([`t`, Rsub('calc'), ` (3.605) > t`, Rsub('crit'), ` (2.447)`]));
+ch.push(P([Rb('Conclusion: '), R(`${H0} is REJECTED. There is a significant difference in mean sodium levels between teenagers (57.40 mmol/L) and retired adults (72.675 mmol/L) at the 95% confidence level.`)]));
+ch.push(Pempty());
+
+ch.push(PB());
+
+// ─────────────── CATEGORY 5 ───────────────
+ch.push(H1('Category 5 – Regression Analysis & Calibration'));
+
+ch.push(H2('Q5.1  Sensor performance vs % CNT: Find (i) correlation coefficient, (ii) regression equation, (iii) confidence limits of slope and intercept.'));
+ch.push(SRC('May/Jun 2025 Q2b'));
+ch.push(TBL([
+  ['Weight % CNT (x)','Sensor Performance % (y)'],
+  ['0','49.5'],
+  ['2','60.1'],
+  ['4','71.3'],
+  ['6','79.8'],
+  ['8','92.1'],
+],[4500,4500]));
+ch.push(Pempty());
+ch.push(P([Rb('Step 1: Summary statistics (n = 5)')]));
+ch.push(P([`Σx = 20,   Σy = 352.8,   ${XBAR} = 4.0,   ${YBAR} = 70.56`]));
+ch.push(P([`Σx${sup2} = 0+4+16+36+64 = 120`]));
+ch.push(P([`Σxy = 0 + 120.2 + 285.2 + 478.8 + 736.8 = 1621.0`]));
+ch.push(P([Rb('Step 2: Slope b and intercept a')]));
+ch.push(P([`Σ(x`, Rsub('i'), `−${XBAR})${sup2} = (0−4)${sup2}+(2−4)${sup2}+(4−4)${sup2}+(6−4)${sup2}+(8−4)${sup2} = 16+4+0+4+16 = 40`]));
+ch.push(P([`Σ(x`, Rsub('i'), `−${XBAR})(y`, Rsub('i'), `−${YBAR}) = (−4)(−21.06)+(−2)(−10.46)+(0)(0.74)+(2)(9.24)+(4)(21.54)`]));
+ch.push(P([`= 84.24 + 20.92 + 0 + 18.48 + 86.16 = 209.80`]));
+ch.push(P([`b = 209.80 / 40 = `, Rb('5.245')]));
+ch.push(P([`a = ${YBAR} − b${XBAR} = 70.56 − 5.245 × 4 = 70.56 − 20.98 = `, Rb('49.58')]));
+ch.push(P([Rb('Regression equation: '), Rf('y = 5.245x + 49.58')]));
+ch.push(P([Rb('Step 3: Correlation coefficient r')]));
+ch.push(P([`Σ(y`, Rsub('i'), `−${YBAR})${sup2} = (−21.06)${sup2}+(−10.46)${sup2}+(0.74)${sup2}+(9.24)${sup2}+(21.54)${sup2}`]));
+ch.push(P([`= 443.52 + 109.41 + 0.5476 + 85.38 + 463.97 = 1102.83`]));
+ch.push(P([`r = 209.80 / ${SQRT}(40 × 1102.83) = 209.80 / ${SQRT}44113.2 = 209.80 / 210.03 = `, Rb('0.9989 ≈ 0.999')]));
+ch.push(P([Rb('Step 4: Residual standard deviation s'), Rb('y/x')]));
+ch.push(P([`Predicted ${YHAT} values: 49.58, 60.07, 70.56, 81.05, 91.54`]));
+ch.push(P([`Residuals: −0.08, +0.03, +0.74, −1.25, +0.56`]));
+ch.push(P([`Σresiduals${sup2} = 0.0064+0.0009+0.5476+1.5625+0.3136 = 2.4310`]));
+ch.push(P([`s`, Rsub('y/x'), ` = ${SQRT}(2.4310 / 3) = ${SQRT}0.8103 = `, Rb('0.9002')]));
+ch.push(P([Rb('Step 5: Confidence limits for slope b')]));
+ch.push(P([`s`, Rsub('b'), ` = s`, Rsub('y/x'), ` / ${SQRT}Σ(x`, Rsub('i'), `−${XBAR})${sup2} = 0.9002 / ${SQRT}40 = 0.9002 / 6.3246 = 0.1424`]));
+ch.push(P([`t`, Rsub('n−2, 95%'), ` = t${s3}, ${s9}${s5}% = 3.182`]));
+ch.push(P([`b ${PM} t × s`, Rsub('b'), ` = 5.245 ${PM} 3.182 × 0.1424 = 5.245 ${PM} 0.453`]));
+ch.push(P([Rb('95% CI for slope: 4.792 to 5.698')]));
+ch.push(P([Rb('Step 6: Confidence limits for intercept a')]));
+ch.push(P([`s`, Rsub('a'), ` = s`, Rsub('y/x'), ` × ${SQRT}[Σx`, Rsub('i'), `${sup2} / (n × Σ(x`, Rsub('i'), `−${XBAR})${sup2})]`]));
+ch.push(P([`= 0.9002 × ${SQRT}[120 / (5 × 40)] = 0.9002 × ${SQRT}0.6 = 0.9002 × 0.7746 = 0.6973`]));
+ch.push(P([`a ${PM} t × s`, Rsub('a'), ` = 49.58 ${PM} 3.182 × 0.6973 = 49.58 ${PM} 2.218`]));
+ch.push(P([Rb('95% CI for intercept: 47.362 to 51.798')]));
+ch.push(TBL([
+  ['Parameter','Value'],
+  ['Regression equation','y = 5.245x + 49.58'],
+  ['Correlation coefficient (r)','0.9989 ≈ 0.999'],
+  ['95% CI for slope','4.792 to 5.698'],
+  ['95% CI for intercept','47.362 to 51.798'],
+],[4000,5000]));
+ch.push(Pempty());
+
+ch.push(H2('Q5.2  LOD from calibration using regression: Lead concentrations in drain water.'));
+ch.push(SRC('May/Jun 2024 Q2b'));
+ch.push(TBL([
+  ['Lead Concentration ppm (x)','Intensities (y)'],
+  ['0','0.18'],['5','0.53'],['10','0.92'],['15','1.33'],['20','1.82'],
+],[4500,4500]));
+ch.push(P([`n=5,   Σx=50,   Σy=4.78,   ${XBAR}=10,   ${YBAR}=0.956`]));
+ch.push(P([`Σ(x`, Rsub('i'), `−${XBAR})${sup2} = 250;   Σ(x`, Rsub('i'), `−${XBAR})(y`, Rsub('i'), `−${YBAR}) = 20.40`]));
+ch.push(P([`b = 20.40/250 = 0.08160;   a = 0.956 − 0.08160×10 = `, Rb('0.140')]));
+ch.push(P([Rf('Regression: y = 0.0816x + 0.140')]));
+ch.push(P([`Residuals${sup2}: 0.001600+0.000324+0.001296+0.001156+0.002304 = 0.006680`]));
+ch.push(P([`s`, Rsub('y/x'), ` = ${SQRT}(0.006680/3) = ${SQRT}0.002227 = 0.04719`]));
+ch.push(P([`LOD (concentration) = 3 × s`, Rsub('y/x'), ` / b = 3 × 0.04719 / 0.0816 = 0.14157 / 0.0816 = `, Rb('1.73 ppm')]));
+ch.push(Pempty());
+
+ch.push(PB());
+
+// ─────────────── CATEGORY 6 ───────────────
+ch.push(H1('Category 6 – Stability-Indicating Methods & Forced Degradation'));
+
+ch.push(H2('Q6.1  What is a Stability-Indicating Method (SIM)? State TWO purposes.'));
+ch.push(SRC('May/Jun 2025 Q3a; Oct 2024 Q3a; May/Jun 2024 Q4a; Oct 2023 Q3a'));
+ch.push(P([Rb('Definition: '), R('A Stability-Indicating Method (SIM) is a validated analytical procedure that can accurately and specifically determine the concentration of the active pharmaceutical ingredient (API) in the presence of its degradation products, impurities, excipients, and other potential interference. It distinguishes the intact drug from its degraded/modified forms.')]));
+ch.push(P([Rb('TWO Purposes:')]));
+ch.push(bull([Rb('1. To verify the safety and efficacy of a drug formulation throughout its designated shelf life '), R('— ensures that the quantified API represents only the active, undegraded compound and confirms the formulation remains effective over time.')]));
+ch.push(bull([Rb('2. To detect, quantify and characterise degradation products '), R('— identifies degradation pathways (acid/base hydrolysis, oxidation, photodegradation, thermal degradation) to determine appropriate storage conditions and shelf life.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q6.2  Briefly explain ONE forced degradation method and its acceptance criteria.'));
+ch.push(SRC('May/Jun 2025 Q3b; Oct 2024 Q1c; May/Jun 2024 Q4b'));
+ch.push(P([Rb('Acid Hydrolysis (example): '), R('The drug sample (~1 mg/mL) is treated with dilute HCl (0.1–1.0 M) at elevated temperature (e.g., 60°C) or room temperature for a defined period. Stressed samples are neutralised, diluted, and injected into the HPLC system. Chromatograms are compared with an unstressed control to identify new degradation product peaks.')]));
+ch.push(P([Rb('Acceptance Criteria:')]));
+ch.push(bull('Degradation should be 5–30% of original concentration (sufficient degradation without complete destruction).'));
+ch.push(bull('The main API peak must be resolved from all degradation product peaks (resolution R_s ≥ 1.5).'));
+ch.push(bull('Mass balance: % intact API + % degradation products ≈ 100% (within analytical error).'));
+ch.push(Pempty());
+ch.push(TBL([
+  ['Degradation Method','Condition','Applied Stressor'],
+  ['Acid Hydrolysis','0.1 M or 1.0 M HCl, 60°C, 1–24 h','Acidic pH environment'],
+  ['Alkaline (Base) Hydrolysis','0.1 M NaOH, 60°C, 1–24 h','Basic pH environment'],
+  [`Oxidative Hydrolysis`,`3–30% ${H2O2}, room temperature, 1–24 h`,'Peroxide/oxidising agent'],
+  ['Photodegradation (UV/VIS)','UV lamp (254 nm or sunlight lamp), ICH Q1B','Light exposure'],
+  ['Thermal Degradation','Dry heat 40–80°C, extended time','Elevated temperature'],
+  ['Neutral/Aqueous Hydrolysis','Water or buffer, 60–80°C','Moisture'],
+],[2800,3700,2500]));
+ch.push(Pempty());
+
+ch.push(H2('Q6.3  Based on AMP degradation data, propose storage conditions and transportation precautions.'));
+ch.push(SRC('May/Jun 2025 Q3d'));
+ch.push(TBL([
+  ['Temperature & Duration','Acid Hydrolysis (µg/mL)','Oxidative Hydrolysis (µg/mL)','Photodegradation (µg/mL)'],
+  ['25°C, 1 day','98','98','99'],
+  ['25°C, 7 days','98','98','98'],
+  ['50°C, 1 day','97','96','90'],
+  ['50°C, 7 days','97','96','83'],
+],[2500,2200,2200,2100]));
+ch.push(P([Rb('Analysis: '), R(`At 25°C, all conditions show minimal degradation (96–99% remaining). At 50°C, photodegradation is the most critical pathway — 83% remaining after 7 days (>15% loss, unacceptable). Acid and oxidative hydrolysis show only ~3–4% degradation at 50°C.`)]));
+ch.push(P([Rb('Recommended Storage Conditions:')]));
+ch.push(bull(`Store at controlled room temperature (15–25${DEG}C) to minimise thermal degradation.`));
+ch.push(bull('Store in amber (light-resistant) containers or dark storage areas to prevent photodegradation.'));
+ch.push(bull('Store away from oxidising agents and acids; use airtight containers to reduce oxidative hydrolysis.'));
+ch.push(P([Rb('Transportation Precautions:')]));
+ch.push(bull(`Transport in temperature-controlled (cool chain) packaging to ensure temperature does not exceed 25${DEG}C during transit.`));
+ch.push(bull('Use opaque/light-blocking packaging during transportation to protect from UV/visible light exposure.'));
+ch.push(bull('Include desiccants to control humidity and reduce hydrolysis risk.'));
+ch.push(Pempty());
+
+ch.push(H2('Q6.4  Based on FAV degradation results, propose storage conditions and handling precautions.'));
+ch.push(SRC('Oct 2024 Q3c'));
+ch.push(TBL([
+  ['Temperature & Duration','Alkali Degradation (µg/mL)','Oxidative Degradation (µg/mL)','Photolytic Degradation (µg/mL)'],
+  ['25°C, 1 day','99','99','90'],
+  ['25°C, 7 days','98','97','89'],
+  ['50°C, 1 day','97','91','85'],
+  ['50°C, 7 days','96','90','83'],
+],[2500,2200,2200,2100]));
+ch.push(P([Rb('Key finding: '), R('FAV is most susceptible to photolytic degradation — 10% loss after 1 day at 25°C, and 17% after 7 days at 50°C. Oxidative degradation causes ~10% loss at 50°C (7 days). Alkali hydrolysis causes only ~4% loss at 50°C (7 days).')]));
+ch.push(bull(`Storage: Store FAV in amber/opaque light-resistant containers at controlled room temperature (${LEQ}25${DEG}C). Protect from direct sunlight, UV radiation, and oxidising agents. Tightly seal containers.`));
+ch.push(bull('Handling: Handle under subdued or yellow lighting (UV-filtered). Avoid prolonged exposure to air. Do not store in alkaline solutions. Wear appropriate PPE.'));
+ch.push(Pempty());
+
+ch.push(PB());
+
+// ─────────────── CATEGORY 7 ───────────────
+ch.push(H1('Category 7 – Bioanalytical Method Validation'));
+
+ch.push(H2('Q7.1  Identify ONE challenge in developing bioanalytical methods and suggest a solution.'));
+ch.push(SRC('May/Jun 2025 Q4a; Oct 2024 Q4a; Apr/May 2022 Q3b; Oct 2021 Q3'));
+ch.push(P([Rb('Challenge: Matrix Effect from Biological Matrices')]));
+ch.push(P(['Biological matrices (plasma, blood, urine) contain endogenous compounds (phospholipids, proteins, metabolites, salts) that can co-elute with the analyte and cause ion suppression or enhancement during LC-MS/MS analysis. This leads to inaccurate quantification and poor reproducibility.']));
+ch.push(P([Rb('Solutions:')]));
+ch.push(bull([R('Use a '), Rb('stable isotope-labelled internal standard'), R(' (e.g., deuterated analogue, '), R('2', {superScript:true, size:18}), R('H or '), R('15', {superScript:true, size:18}), R('N-labelled) that co-elutes with the analyte and experiences the same matrix effect, thereby correcting for suppression/enhancement.')]));
+ch.push(bull('Apply protein precipitation followed by solid-phase extraction (SPE) or liquid-liquid extraction (LLE) to remove matrix proteins and phospholipids before analysis.'));
+ch.push(bull('Validate the matrix effect using matrix factor (MF) assessment across ≥6 different lots of biological matrix. MF should be 0.85–1.15 after normalisation with internal standard.'));
+ch.push(Pempty());
+
+ch.push(H2('Q7.2  What is an INTERNAL STANDARD (IS) and why is it used in bioanalytical methods?'));
+ch.push(SRC('Oct 2024 Q4b; May/Jun 2023 Q3a; Oct 2022 Q4a; Apr/May 2022 Q3a; Oct 2021 Q3'));
+ch.push(P([Rb('Definition: '), R('An internal standard (IS) is a compound added in a known, constant amount to all samples (calibrators, QC samples, and unknowns) before sample preparation. It should have physicochemical properties similar to the analyte but be distinctly measurable.')]));
+ch.push(P([Rb('Purpose: '), R('The IS corrects for variations in sample preparation, injection volume, ionisation efficiency, and instrument response. The ratio of analyte signal to IS signal (peak area ratio) is used for quantification, improving precision and accuracy compared to using absolute peak areas alone.')]));
+ch.push(P([Rb('Types of IS:')]));
+ch.push(bull([R('Structural analogues (similar structure to analyte)')]));
+ch.push(bull([R('Deuterium-labelled ('), R('2', {superScript:true, size:18}), R('H) compounds — gold standard for LC-MS/MS')]));
+ch.push(bull([R('Stable isotope ('), R('13', {superScript:true, size:18}), R('C, '), R('15', {superScript:true, size:18}), R('N) compounds')]));
+ch.push(Pempty());
+
+ch.push(H2('Q7.3  Accuracy and precision results for CUR and QUE. Do they fulfil ICH guidelines?'));
+ch.push(SRC('Oct 2024 Q4c,d'));
+ch.push(TBL([
+  ['Compound','Actual (µg/mL)','Mean Recovered (µg/mL)','SD (µg/mL)','% Recovery','%RSD'],
+  ['CUR','4.8','4.75','0.05','98.96%','1.05%'],
+  ['QUE','4.8','4.76','0.05','99.17%','1.05%'],
+  ['CUR','6.0','5.99','0.01','99.83%','0.17%'],
+  ['QUE','6.0','5.97','0.11','99.50%','1.84%'],
+  ['CUR','7.2','7.20','0.03','100.0%','0.42%'],
+  ['QUE','7.2','7.18','0.05','99.72%','0.70%'],
+],[1500,1700,2100,1500,1700,1500]));
+ch.push(P([Rb('Accuracy'), R(' (ICH criterion: 98–102%): All % recovery values fall between 98.96% and 100.0% → All levels '), Rb('PASS.')]));
+ch.push(P([Rb('Precision'), R(' (ICH criterion: %RSD ≤ 15%): All %RSD values are well below 2% → All levels '), Rb('PASS.')]));
+ch.push(P([Rb('Overall conclusion: '), R('Both accuracy and precision results fully fulfil the ICH acceptance criteria for this RP-HPLC bioanalytical method.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q7.4  Spike-and-recovery method: definition, procedure, and ONE advantage.'));
+ch.push(SRC('May/Jun 2023 Q4c; Oct 2022 Q4e; Apr/May 2022 Q4a; Oct 2021 Q3c'));
+ch.push(P([Rb('Definition: '), R('The spike-and-recovery method involves adding (spiking) a known quantity of the analyte into a blank matrix (e.g., drug-free plasma) and then extracting and quantifying the spiked sample using the analytical method.')]));
+ch.push(P([Rb('Procedure:')]));
+ch.push(numbered('Prepare a blank matrix sample (e.g., drug-free plasma).'));
+ch.push(numbered('Spike a precisely known amount of the pure analyte into the blank matrix at the desired concentration.'));
+ch.push(numbered('Process the spiked sample through the complete sample preparation procedure (protein precipitation, LLE, or SPE).'));
+ch.push(numbered('Analyse by HPLC and calculate: % Recovery = (amount found / amount spiked) × 100.'));
+ch.push(numbered('Acceptance criterion: % recovery should be 85–115% (±15%) at each concentration level.'));
+ch.push(P([Rb('Advantage: '), R('Directly evaluates the efficiency of the sample preparation procedure; identifies analyte loss during extraction and corrects for matrix-related variability.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q7.5  Repeatability and Intermediate Precision for Belzutifan (BF). Do the results fulfil ICH acceptance criteria?'));
+ch.push(SRC('Oct 2023 Q3c'));
+ch.push(TBL([
+  ['Analysis No.','Repeatability (mAU·s)','Intermediate Precision (mAU·s)'],
+  ['1','1767','1725'],['2','1775','1718'],['3','1782','1707'],
+  ['4','1771','1719'],['5','1787','1765'],['6','1799','1721'],
+],[2000,3500,3500]));
+ch.push(P([Rb('Repeatability:')]));
+ch.push(P([`${XBAR} = (1767+1775+1782+1771+1787+1799)/6 = 10681/6 = 1780.2 mAU·s`]));
+ch.push(P([`s`, Rsub('rep'), ` = ${SQRT}[(174.24+27.04+3.24+84.64+46.24+353.44)/5] = ${SQRT}(689.04/5) = ${SQRT}137.8 = 11.74`]));
+ch.push(P([`%RSD`, Rsub('rep'), ` = 11.74/1780.2 × 100 = `, Rb('0.66%'), R(`   ICH criterion ${LEQ}2%: `), Rb('PASS')]));
+ch.push(P([Rb('Intermediate Precision:')]));
+ch.push(P([`${XBAR} = (1725+1718+1707+1719+1765+1721)/6 = 10355/6 = 1725.8 mAU·s`]));
+ch.push(P([`s`, Rsub('IP'), ` = ${SQRT}[(0.64+60.84+353.44+46.24+1536.64+23.04)/5] = ${SQRT}(2020.8/5) = ${SQRT}404.16 = 20.10`]));
+ch.push(P([`%RSD`, Rsub('IP'), ` = 20.10/1725.8 × 100 = `, Rb('1.16%'), R(`   ICH criterion ${LEQ}2%: `), Rb('PASS')]));
+ch.push(P([Rb('Conclusion: '), R('Both repeatability (%RSD = 0.66%) and intermediate precision (%RSD = 1.16%) are well within the ICH acceptance criterion of ≤2% for HPLC methods. The method is highly precise.')]));
+ch.push(Pempty());
+
+ch.push(PB());
+
+// ─────────────── CATEGORY 8 ───────────────
+ch.push(H1('Category 8 – Extraction Methods (LLE & SPE)'));
+
+ch.push(H2('Q8.1  What is LIQUID-LIQUID EXTRACTION (LLE)? How is it performed? Give ONE advantage and ONE disadvantage.'));
+ch.push(SRC('May/Jun 2025 Q4b; Oct 2024 Q4; Oct 2022 Q4b; Apr/May 2022 Q3b; Oct 2021 Q3b'));
+ch.push(P([Rb('Definition: '), R('Liquid-liquid extraction (LLE) is a sample preparation technique that separates an analyte from a biological or aqueous matrix by partitioning it between two immiscible liquid phases — an aqueous phase and an organic (non-polar) solvent phase — based on differences in solubility (partition coefficient, K').')]));
+ch.push(P([Rb('Procedure:')]));
+ch.push(numbered('Add a measured volume of biological sample (e.g., plasma) to a separating funnel or centrifuge tube.'));
+ch.push(numbered('Add an appropriate organic solvent (e.g., dichloromethane, ethyl acetate, MTBE) that is immiscible with the aqueous phase.'));
+ch.push(numbered('Add internal standard if required. Adjust pH if necessary (ionisable compounds need pH adjustment to convert to neutral form for extraction).'));
+ch.push(numbered('Vortex/shake the mixture vigorously (1–10 min) to allow partitioning of the analyte into the organic phase.'));
+ch.push(numbered('Centrifuge to separate the two layers. Collect the organic layer containing the analyte.'));
+ch.push(numbered(`Evaporate the organic solvent under a nitrogen stream at 37–40${DEG}C.`));
+ch.push(numbered('Reconstitute the residue in mobile phase (or appropriate solvent) and inject into the HPLC system.'));
+ch.push(TBL([
+  ['','Detail'],
+  ['ONE Advantage','Low cost; does not require specialised equipment. Can handle large sample volumes and achieve high analyte recovery (>85%) with appropriate solvent selection.'],
+  ['ONE Disadvantage',`Requires large volumes of organic solvents (hazardous, environmentally unfriendly). Emulsion formation can be problematic. May co-extract many matrix interferences.`],
+],[2000,7000]));
+ch.push(Pempty());
+
+ch.push(H2('Q8.2  What is SOLID-PHASE EXTRACTION (SPE)? How is it performed? Give TWO advantages.'));
+ch.push(SRC('Oct 2024 Q4e; Oct 2022 Q4'));
+ch.push(P([Rb('Definition: '), R('Solid-phase extraction (SPE) is a sample preparation technique that uses a solid sorbent material packed in a cartridge to selectively retain the analyte from a liquid sample. The analyte is subsequently eluted with a small volume of appropriate solvent, achieving both clean-up and concentration.')]));
+ch.push(P([Rb('Procedure (4 steps — CONDITION, LOAD, WASH, ELUTE):')]));
+ch.push(numbered([Rb('Condition: '), R('Activate and wet the SPE cartridge with appropriate organic solvent, then equilibrate with aqueous buffer/water.')]));
+ch.push(numbered([Rb('Load: '), R('Pass the biological sample through the cartridge. The analyte (and possibly some matrix components) are retained on the sorbent.')]));
+ch.push(numbered([Rb('Wash: '), R('Wash with a weak solvent to remove matrix interferences (proteins, salts) while keeping the analyte retained.')]));
+ch.push(numbered([Rb('Elute: '), R('Elute the analyte with a small volume of strong organic solvent. Evaporate and reconstitute in mobile phase before HPLC injection.')]));
+ch.push(P([Rb('TWO Advantages:')]));
+ch.push(bull([Rb('Selective clean-up and concentration: '), R('SPE removes matrix interferences (phospholipids, proteins) more effectively than LLE, leading to cleaner extracts and reduced matrix effects.')]));
+ch.push(bull([Rb('Small solvent volumes and automation: '), R('SPE uses less organic solvent than LLE, making it more environmentally friendly and suitable for automation (high-throughput analysis). The analyte is concentrated, improving sensitivity.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q8.3  What is EXTRACTION RECOVERY and how is it validated?'));
+ch.push(SRC('May/Jun 2023 Q3e; Oct 2022 Q4c; Apr/May 2022 Q3c'));
+ch.push(P([Rb('Definition: '), R('Extraction recovery is the fraction (percentage) of the analyte that is successfully extracted from the biological matrix and delivered to the analytical system. It reflects the efficiency of the sample preparation step.')]));
+ch.push(P([Rb('How to validate:')]));
+ch.push(bull('Prepare two sets of samples at 3 concentration levels (low, medium, high QC): (A) analyte spiked into blank matrix BEFORE extraction (pre-extraction spike) and (B) analyte spiked into blank extracted matrix AFTER extraction (post-extraction spike).'));
+ch.push(bull('Process set A through the complete extraction procedure and analyse both sets by HPLC.'));
+ch.push(bull('% Recovery = (peak area of pre-extraction spike / peak area of post-extraction spike) × 100'));
+ch.push(bull([Rb('ICH M10 acceptance criteria: '), R('Recovery should be consistent, precise (%RSD ≤ 15%), and typically ≥50%. A lower recovery is acceptable if it is consistent and the method is validated for accuracy and precision.')]));
+ch.push(Pempty());
+
+ch.push(PB());
+
+// ─────────────── CATEGORY 9 ───────────────
+ch.push(H1('Category 9 – Dissolution Testing'));
+
+ch.push(H2('Q9.1  Propose a dissolution experiment to study the dissolution profile of FAV oral tablets at pH 4.0 over 2 hours.'));
+ch.push(SRC('Oct 2024 Q3d; May/Jun 2023 Q4a; Oct 2023 Q4a; Apr/May 2022 Q4d'));
+ch.push(TBL([
+  ['Parameter','Specification','Justification'],
+  ['Dissolution Medium','Acetate buffer pH 4.0 (sodium acetate + acetic acid)','pH 4.0 mimics the intestinal environment; relevant to in vivo absorption.'],
+  ['Volume of Medium','900 mL','Standard USP volume; ensures sink conditions.'],
+  ['Apparatus','USP Apparatus II (Paddle method)','Most commonly used for tablet dosage forms; gentle, reproducible hydrodynamics.'],
+  ['Rotation Speed','50–75 rpm','Standard for immediate-release tablets; prevents tablet floating.'],
+  ['Temperature',`37.0 ${PM} 0.5${DEG}C`,'Simulates physiological body temperature.'],
+  ['Sampling Time Points','5, 10, 15, 30, 45, 60, 90, 120 min','Multiple time points to construct a complete dissolution profile.'],
+  ['Sample Volume','5 mL per time point with replacement of equal volume of fresh medium','Maintains sink conditions (USP withdrawal with replacement).'],
+  ['Filtration','0.45 µm membrane filter','Removes undissolved particles before HPLC analysis.'],
+  ['Analysis Method','Validated HPLC-DAD or UV spectrophotometry at λmax','Sensitive and specific for FAV.'],
+  ['Acceptance Criterion',`${GEQ}80% FAV released within 30 min (Q30 ${GEQ} 80%) for immediate-release tablets (USP)`,'Standard criterion for immediate-release oral tablets.'],
+  ['Number of Tablets','6 tablets per experiment (n = 6)','ICH and USP requirement.'],
+],[2500,3500,3000]));
+ch.push(Pempty());
+
+ch.push(H2('Q9.2  Explain why dissolution tests for Losartan Potassium (LSP) were conducted at pH 1.2, 4.5 and 6.8.'));
+ch.push(SRC('Oct 2022 Q3c'));
+ch.push(P('The three pH values simulate different regions of the gastrointestinal (GI) tract:'));
+ch.push(bull([Rb('pH 1.2: '), R('Simulates the fasted gastric environment (stomach under fasting conditions). Critical for drugs with pH-dependent solubility.')]));
+ch.push(bull([Rb('pH 4.5: '), R('Simulates the proximal small intestine (duodenum/jejunum) — the transition pH between stomach and intestine.')]));
+ch.push(bull([Rb('pH 6.8: '), R('Simulates the distal small intestine (ileum) and colon — the primary site of drug absorption. Also represents the BCS (Biopharmaceutics Classification System) recommended pH.')]));
+ch.push(P('These three pH values are recommended by BCS (FDA/ICH) guidelines for dissolution studies to evaluate pH-dependent solubility and dissolution rate, and to support biowaiver applications.'));
+ch.push(Pempty());
+
+ch.push(H2('Q9.3  Precision results for LSP dissolution at pH 1.2. Are the results acceptable?'));
+ch.push(SRC('Oct 2022 Q3e'));
+ch.push(TBL([
+  ['Obs.','Results (First Day)','Results (Third Day)','Results (Different Lab)'],
+  ['1','1.005','1.010','1.008'],
+  ['2','0.995','0.999','0.999'],
+  ['3','0.997','1.002','1.008'],
+  ['4','1.003','1.008','1.007'],
+  ['5','1.001','1.006','1.007'],
+  ['6','0.999','1.004','1.004'],
+],[1500,2500,2500,2500]));
+ch.push(P([`First day:   ${XBAR} = 1.000,   s = 0.00365,   `, Rb('%RSD = 0.365%')]));
+ch.push(P([`Third day:   ${XBAR} = 1.005,   s = 0.00366,   `, Rb('%RSD = 0.364%')]));
+ch.push(P([`Different lab:   ${XBAR} = 1.006,   s = 0.00330,   `, Rb('%RSD = 0.328%')]));
+ch.push(P([`ICH criterion for precision: %RSD ${LEQ} 2.0% for each level.`]));
+ch.push(P([Rb('All three precision levels (repeatability, intermediate precision, reproducibility) PASS. '), R('The dissolution method demonstrates excellent precision.')]));
+ch.push(Pempty());
+
+ch.push(H2('Q9.4  Highest Vitamin D3 concentration in oral tablets = 0.010 ppm. LOD = 0.007 ppm, LOQ = 0.023 ppm. Acceptable?'));
+ch.push(SRC('Oct 2023 Q4d'));
+ch.push(bull('0.010 ppm > LOD (0.007 ppm) → Vitamin D3 can be DETECTED.'));
+ch.push(bull('0.010 ppm < LOQ (0.023 ppm) → The concentration CANNOT be reliably quantified.'));
+ch.push(P([Rb('Conclusion: NOT acceptable. '), R('The reported concentration falls between LOD and LOQ. While the compound can be detected, reliable and accurate quantification is not possible at this concentration. The method should be optimised to lower the LOQ below 0.010 ppm (e.g., increase sample concentration, use a more sensitive detector, or optimise HPLC conditions).')]));
+ch.push(Pempty());
+
+ch.push(PB());
+
+// ─────────────── QUICK REFERENCE ───────────────
+ch.push(H1('Quick Reference – Key Formulae'));
+ch.push(TBL([
+  ['Parameter','Formula','Notes'],
+  ['LOD (from SD/slope)',`LOD = 3.3 × ${SIG} / b`,`${SIG} = SD of lowest standard or intercept;  b = slope`],
+  ['LOQ (from SD/slope)',`LOQ = 10 × ${SIG} / b`,`${SIG} = SD of lowest standard or intercept;  b = slope`],
+  ['% Recovery (accuracy)','% = (found / actual) × 100','ICH: 98–102% (assay);  ±15% bioanalytical'],
+  ['%RSD (precision)',`%RSD = (s / ${XBAR}) × 100`,'ICH: ≤2% HPLC;  ≤15% bioanalytical'],
+  ['Paired t-test',`t = ${DBAR}${SQRT}n / s${DBAR};   df = n−1`,'Used when same sample, two methods compared'],
+  ['Two-sample t-test (pooled)',`t = (${xbar1}−${xbar2}) / [s${SQRT}(1/${n1}+1/${n2})]`,'Equal variance (after F-test confirms)'],
+  ['F-test',`F = s${s1}${sup2} / s${s2}${sup2}  (larger/smaller)`,`df = n${s1}−1, n${s2}−1`],
+  ['Grubbs test',`G = |suspect − ${XBAR}| / s`,'Compare with G_crit from table'],
+  ['Regression slope b',`b = Σ(x${SUBSCRIPT_i}−${XBAR})(y${SUBSCRIPT_i}−${YBAR}) / Σ(x${SUBSCRIPT_i}−${XBAR})${sup2}`, 'x_i = individual x values; x̄ = mean x'],
+  ['Regression intercept a',`a = ${YBAR} − b × ${XBAR}`,'ȳ = mean y'],
+  ['Correlation coeff. r',`r = Σ(x−${XBAR})(y−${YBAR}) / ${SQRT}[Σ(x−${XBAR})${sup2}Σ(y−${YBAR})${sup2}]`,'Target: r ≥ 0.999 (assay)'],
+  ['s_y/x',`s${SUBSCRIPT_yx} = ${SQRT}[Σ(y${SUBSCRIPT_i}−${YHAT}${SUBSCRIPT_i})${sup2} / (n−2)]`,'Residual standard deviation'],
+  ['s_b (slope CI)',`s_b = s${SUBSCRIPT_yx} / ${SQRT}Σ(x${SUBSCRIPT_i}−${XBAR})${sup2}`,'CI: b ± t(n−2) × s_b'],
+  ['s_a (intercept CI)',`s_a = s${SUBSCRIPT_yx} × ${SQRT}[Σx${SUBSCRIPT_i}${sup2} / (n×Σ(x${SUBSCRIPT_i}−${XBAR})${sup2})]`,'CI: a ± t(n−2) × s_a'],
+],[2800,3400,2800]));
+
+const SUBSCRIPT_i = '\u1D62'; // ᵢ subscript i
+const SUBSCRIPT_yx = '\u1D67\u2093'; // not reliable — just use text
+
+ch.push(Pempty());
+ch.push(P([Ri('All statistical tests use two-tailed test at P = 0.05 (95% confidence) unless otherwise stated.')]));
+ch.push(P([Ri('ICH = International Conference on Harmonisation;  USP = United States Pharmacopeia;  EP = European Pharmacopoeia.')]));
+
+// ─────────────── BUILD DOCUMENT ───────────────
+const doc = new Document({
+  numbering: {
+    config: [
+      {
+        reference: 'bullets',
+        levels: [{
+          level: 0, format: LevelFormat.BULLET, text: '\u2022',
+          alignment: AlignmentType.LEFT,
+          style: { paragraph: { indent: { left: 720, hanging: 360 } } }
+        }]
+      },
+      {
+        reference: 'numbers',
+        levels: [{
+          level: 0, format: LevelFormat.DECIMAL, text: '%1.',
+          alignment: AlignmentType.LEFT,
+          style: { paragraph: { indent: { left: 720, hanging: 360 } } }
+        }]
+      }
+    ]
+  },
+  styles: {
+    default: {
+      document: { run: { font: 'Arial', size: 22 } }
+    },
+    paragraphStyles: [
+      {
+        id: 'Heading1', name: 'Heading 1', basedOn: 'Normal', next: 'Normal', quickFormat: true,
+        run: { size: 32, bold: true, font: 'Arial', color: '1F4E79' },
+        paragraph: { spacing: { before: 480, after: 200 }, outlineLevel: 0 }
+      },
+      {
+        id: 'Heading2', name: 'Heading 2', basedOn: 'Normal', next: 'Normal', quickFormat: true,
+        run: { size: 26, bold: true, font: 'Arial', color: '1F4E79' },
+        paragraph: { spacing: { before: 280, after: 100 }, outlineLevel: 1 }
+      },
+      {
+        id: 'Heading3', name: 'Heading 3', basedOn: 'Normal', next: 'Normal', quickFormat: true,
+        run: { size: 24, bold: true, font: 'Arial', color: '2E75B6' },
+        paragraph: { spacing: { before: 200, after: 80 }, outlineLevel: 2 }
+      }
+    ]
+  },
+  sections: [{
+    properties: {
+      page: {
+        size: { width: 11906, height: 16838 },
+        margin: { top: 1440, right: 1200, bottom: 1440, left: 1200 }
+      }
+    },
+    children: ch
+  }]
+});
+
+Packer.toBuffer(doc).then(buf => {
+  fs.writeFileSync('/mnt/user-data/outputs/BACH3123_Corrected.docx', buf);
+  console.log('Done!');
+}).catch(e => { console.error(e); process.exit(1); });
